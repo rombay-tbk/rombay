@@ -11,6 +11,7 @@ Daftar isi:
 5. [Alur pembayaran sukses](#5-alur-pembayaran-sukses)
 6. [Jalur keputusan request pembayaran](#6-jalur-keputusan-request-pembayaran)
 7. [Siklus status pembayaran](#7-siklus-status-pembayaran)
+8. [Deployment Kubernetes](#8-deployment-kubernetes)
 
 ---
 
@@ -286,3 +287,9 @@ Efek tiap transisi pada kolom `accounts`:
 
 - Job yang menandai PENDING lama menjadi EXPIRED belum didesain. Indeks `idx_payments_pending` di migrasi sudah disiapkan untuk itu.
 - Event `payment.expired` perlu ditambahkan ke kontrak di `docs/events/`. Ledger tidak perlu mencatat apa pun untuk status ini karena dana tidak pernah berpindah.
+
+---
+
+## 8. Deployment Kubernetes
+
+Rancangan deployment production-ready di Kubernetes, termasuk topologi jaringan, pemetaan resource, high availability, keamanan, observability, dan alur deployment, dibahas di [Kubernetes Architecture](kubernetes-architecture.md).
