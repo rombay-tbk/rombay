@@ -11,7 +11,7 @@ Daftar isi:
 5. [Alur pembayaran sukses](#5-alur-pembayaran-sukses)
 6. [Jalur keputusan request pembayaran](#6-jalur-keputusan-request-pembayaran)
 7. [Siklus status pembayaran](#7-siklus-status-pembayaran)
-8. [Deployment Kubernetes](#8-deployment-kubernetes)
+8. [Kubernetes Deployment](#8-kubernetes-deployment)
 9. [Kubernetes Pipeline](#9-kubernetes-pipeline)
 
 ---
@@ -291,9 +291,9 @@ Efek tiap transisi pada kolom `accounts`:
 
 ---
 
-## 8. Deployment Kubernetes
+## 8. Kubernetes Deployment
 
-Rancangan deployment production-ready di Kubernetes, termasuk topologi jaringan, pemetaan resource, high availability, keamanan, observability, dan alur deployment, dibahas di [Kubernetes Architecture](kubernetes-architecture.md).
+The production Kubernetes design—including cluster topology, networking, stateful platforms, availability, security, observability, and deployment flow—is documented in [Kubernetes Architecture](kubernetes-architecture.md).
 
 ---
 
