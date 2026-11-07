@@ -12,7 +12,7 @@ Daftar isi:
 6. [Jalur keputusan request pembayaran](#6-jalur-keputusan-request-pembayaran)
 7. [Siklus status pembayaran](#7-siklus-status-pembayaran)
 8. [Deployment Kubernetes](#8-deployment-kubernetes)
-9. [Pipeline Kubernetes](#9-pipeline-kubernetes)
+9. [Kubernetes Pipeline](#9-kubernetes-pipeline)
 
 ---
 
@@ -297,6 +297,6 @@ Rancangan deployment production-ready di Kubernetes, termasuk topologi jaringan,
 
 ---
 
-## 9. Pipeline Kubernetes
+## 9. Kubernetes Pipeline
 
-Rancangan CI/CD langsung ke satu environment production pada self-managed Kubernetes tiga VM, termasuk GitHub Actions, GHCR, Helm, Argo CD, migrasi, rollout, dan rollback, dibahas di [Pipeline Architecture](pipeline-architecture.md).
+The direct-to-production CI/CD design for a three-VM, self-managed Kubernetes cluster—including GitHub Actions, GHCR, Helm, Argo CD, migrations, rollout, and rollback—is documented in [Pipeline Architecture](pipeline-architecture.md).

@@ -1,123 +1,123 @@
-# Arsitektur Pipeline Rombay Kubernetes
+# Rombay Kubernetes Pipeline Architecture
 
-Dokumen ini menjelaskan CI/CD Rombay untuk satu environment production pada self-managed Kubernetes yang terdiri dari tiga VM. Tidak ada environment development atau staging permanen.
+This document describes the Rombay CI/CD pipeline for a single production environment running on a three-VM, self-managed Kubernetes cluster. There are no permanent development or staging environments.
 
-Keputusan utama:
+Key decisions:
 
-- Tiga VM membentuk satu cluster Kubernetes production.
-- Setiap VM berperan sebagai control-plane sekaligus worker agar tidak membutuhkan VM tambahan.
-- Seluruh runtime Rombay, PostgreSQL, Kafka, Redis, storage, observability, dan delivery controller berjalan di Kubernetes.
-- Pull request source code menjadi approval manusia sebelum release.
-- Setelah source code di-merge, build dan deployment ke production berjalan otomatis.
-- Repo `rombay-kubernetes` menjadi source of truth desired state production.
-- Helm hanya merender manifest; Argo CD menarik dan menerapkannya ke cluster.
-- Image dibangun sekali dan selalu dipasang berdasarkan digest immutable.
+- Three VMs form one production Kubernetes cluster.
+- Each VM acts as both a control-plane and worker node to avoid requiring additional VMs.
+- All Rombay runtime components, PostgreSQL, Kafka, Redis, storage, observability, and delivery controllers run in Kubernetes.
+- The application source pull request is the human approval gate before a release.
+- After the source pull request is merged, the build and production deployment are automatic.
+- The `rombay-kubernetes` repository is the source of truth for the production desired state.
+- Helm only renders manifests; Argo CD pulls and applies them to the cluster.
+- An image is built once and deployed by immutable digest.
 
-GitHub dan GHCR tetap menjadi layanan source control, CI control plane, dan container registry. Workload runtime tidak bergantung pada managed Kubernetes, managed database, managed Kafka, atau managed Redis.
+GitHub and GHCR remain the source control, CI control plane, and container registry. Runtime workloads do not depend on managed Kubernetes, managed databases, managed Kafka, or managed Redis.
 
-## 1. Arsitektur tingkat tinggi
-
-```mermaid
-flowchart TB
-  DEV["Developer"] --> PR["Pull request<br/>service repository"]
-
-  subgraph CI["Continuous Integration — GitHub Actions"]
-    PR --> CHECK["Lint + test + security scan"]
-    CHECK --> REVIEW{"Review dan checks lulus?"}
-    REVIEW -- tidak --> FIX["Perbaiki source code"]
-    REVIEW -- ya --> MERGE["Merge ke main"]
-    MERGE --> BUILD["Build image sekali"]
-    BUILD --> REG["Push GHCR<br/>image@sha256:digest"]
-  end
-
-  REG --> BOT["Deployment workflow<br/>buat PR update digest"]
-
-  subgraph GITOPS["rombay-kubernetes"]
-    VALUES["production values<br/>desired image digest"]
-    VALIDATE["Helm lint + render<br/>schema + policy check"]
-    AUTMERGE["Auto-merge<br/>image-only change"]
-    VALUES --> VALIDATE --> AUTMERGE
-  end
-
-  BOT --> VALUES
-  AUTMERGE --> ARGO
-
-  subgraph K8S["Self-managed Kubernetes production — 3 VM"]
-    ARGO["Argo CD<br/>pull + reconcile"]
-    HELM["Helm renderer"]
-    MIGRATION["PreSync migration Job"]
-    APP["Gateway + Core + Ledger"]
-    DATA["PostgreSQL + Kafka + Redis"]
-    OBS["Metrics + logs + alerts"]
-
-    ARGO --> HELM --> MIGRATION
-    MIGRATION -->|sukses| APP
-    APP --> DATA
-    APP --> OBS
-    DATA --> OBS
-  end
-
-  MIGRATION -->|gagal| FAILED["Sync gagal<br/>rollout dihentikan"]
-```
-
-Tidak ada promotion service. Kotak `Deployment workflow` adalah GitHub Actions job yang memakai GitHub App untuk membuat pull request lintas repository.
-
-## 2. Topologi cluster tiga VM
+## 1. High-level architecture
 
 ```mermaid
-flowchart TB
-  LB["MetalLB + Gateway API<br/>entry point production"]
+graph TD
+  n1["Developer"] --> n2["Service repository pull request"]
 
-  subgraph CLUSTER["Kubernetes production cluster"]
-    subgraph VM1["VM 1"]
-      CP1["control-plane + etcd"]
-      W1["worker workloads"]
-      D1["storage disk"]
-    end
-
-    subgraph VM2["VM 2"]
-      CP2["control-plane + etcd"]
-      W2["worker workloads"]
-      D2["storage disk"]
-    end
-
-    subgraph VM3["VM 3"]
-      CP3["control-plane + etcd"]
-      W3["worker workloads"]
-      D3["storage disk"]
-    end
-
-    ROOK["Rook-Ceph<br/>replicated storage"]
-    WORKLOADS["Rombay + PostgreSQL<br/>Kafka + Redis + platform"]
-
-    D1 --> ROOK
-    D2 --> ROOK
-    D3 --> ROOK
-    ROOK --> WORKLOADS
-    W1 --> WORKLOADS
-    W2 --> WORKLOADS
-    W3 --> WORKLOADS
+  subgraph ci["Continuous Integration - GitHub Actions"]
+    n2 --> n3["Lint, test, and security scan"]
+    n3 --> n4{"Review and checks passed?"}
+    n4 -- No --> n5["Fix the source code"]
+    n4 -- Yes --> n6["Merge into main"]
+    n6 --> n7["Build the image once"]
+    n7 --> n8["Push image digest to GHCR"]
   end
 
-  LB --> WORKLOADS
+  n8 --> n9["Deployment workflow opens an image update PR"]
+
+  subgraph gitops["rombay-kubernetes"]
+    n10["Production values with desired image digest"]
+    n11["Helm lint and render plus schema and policy checks"]
+    n12["Auto-merge valid image-only change"]
+    n10 --> n11 --> n12
+  end
+
+  n9 --> n10
+  n12 --> n13
+
+  subgraph k8s["Self-managed production Kubernetes - 3 VMs"]
+    n13["Argo CD pulls and reconciles"]
+    n14["Helm renderer"]
+    n15["PreSync migration Job"]
+    n16["Gateway, Core, and Ledger"]
+    n17["PostgreSQL, Kafka, and Redis"]
+    n18["Metrics, logs, and alerts"]
+
+    n13 --> n14 --> n15
+    n15 -->|Success| n16
+    n16 --> n17
+    n16 --> n18
+    n17 --> n18
+  end
+
+  n15 -->|Failure| n19["Sync fails and rollout stops"]
 ```
 
-Scheduler harus menyebarkan replica service dan komponen quorum ke VM berbeda menggunakan topology spread, pod anti-affinity, serta `PodDisruptionBudget`.
+There is no promotion service. The deployment workflow is a GitHub Actions job that uses a GitHub App to open a cross-repository pull request.
 
-Ketiga VM harus memiliki kapasitas tersisa yang cukup agar workload kritis tetap berjalan ketika satu VM tidak tersedia. Jumlah replica tidak otomatis menjamin high availability jika dua VM yang tersisa tidak mampu menampung pod hasil rescheduling.
+## 2. Three-VM cluster topology
 
-## 3. Pembagian tanggung jawab repository
+```mermaid
+graph TD
+  n1["MetalLB and Gateway API production entry point"]
 
-| Repository | Tanggung jawab |
+  subgraph cluster["Production Kubernetes cluster"]
+    subgraph vm1["VM 1"]
+      n2["Control plane and etcd"]
+      n3["Worker workloads"]
+      n4["Storage disk"]
+    end
+
+    subgraph vm2["VM 2"]
+      n5["Control plane and etcd"]
+      n6["Worker workloads"]
+      n7["Storage disk"]
+    end
+
+    subgraph vm3["VM 3"]
+      n8["Control plane and etcd"]
+      n9["Worker workloads"]
+      n10["Storage disk"]
+    end
+
+    n11["Rook-Ceph replicated storage"]
+    n12["Rombay, PostgreSQL, Kafka, Redis, and platform workloads"]
+
+    n4 --> n11
+    n7 --> n11
+    n10 --> n11
+    n11 --> n12
+    n3 --> n12
+    n6 --> n12
+    n9 --> n12
+  end
+
+  n1 --> n12
+```
+
+The scheduler must spread service replicas and quorum-based components across different VMs using topology spread constraints, pod anti-affinity, and `PodDisruptionBudget` resources.
+
+The three VMs must retain enough spare capacity to run critical workloads when one VM is unavailable. Replica counts alone do not provide high availability if the remaining two VMs cannot schedule the displaced Pods.
+
+## 3. Repository responsibilities
+
+| Repository | Responsibility |
 |---|---|
-| `rombay-gateway` | Source Go, test, Dockerfile, dan build image Gateway |
-| `rombay-core` | Source Spring Boot, test, migrasi database, dan build image Core |
-| `rombay-ledger` | Source Rust, test, migrasi database, dan build image Ledger |
-| `rombay-kubernetes` | Helm chart, production values, Argo CD Application, platform operator, policy, serta konfigurasi cluster |
+| `rombay-gateway` | Go source, tests, Dockerfile, and Gateway image build |
+| `rombay-core` | Spring Boot source, tests, database migrations, and Core image build |
+| `rombay-ledger` | Rust source, tests, database migrations, and Ledger image build |
+| `rombay-kubernetes` | Helm charts, production values, Argo CD Applications, platform operators, policies, and cluster configuration |
 
-Source repository tidak menyimpan kubeconfig production. Repo Kubernetes tidak membangun ulang image aplikasi.
+Application repositories do not store a production kubeconfig. The Kubernetes repository does not rebuild application images.
 
-## 4. Struktur repository
+## 4. Repository structure
 
 ```text
 rombay-kubernetes/
@@ -149,60 +149,60 @@ rombay-kubernetes/
 └── docs/
 ```
 
-Chart per service tidak mengubah service menjadi aplikasi Helm. Chart hanya mengemas resource Kubernetes milik service tersebut, seperti `Deployment`, `Service`, `HorizontalPodAutoscaler`, `PodDisruptionBudget`, dan `NetworkPolicy`.
+A chart per service does not turn the service into a Helm application. The chart only packages its Kubernetes resources, such as `Deployment`, `Service`, `HorizontalPodAutoscaler`, `PodDisruptionBudget`, and `NetworkPolicy`.
 
-Platform stateful dikelola melalui operator dan custom resource:
+Stateful platform components are managed through operators and custom resources:
 
-- CloudNativePG mengelola PostgreSQL Core dan PostgreSQL Ledger secara terpisah.
-- Strimzi mengelola Kafka, topic, user, dan credential terkait.
-- Redis berjalan dalam mode high availability melalui operator atau chart yang dipilih.
-- Rook-Ceph menyediakan persistent volume dan object storage.
+- CloudNativePG manages separate Core and Ledger PostgreSQL clusters.
+- Strimzi manages Kafka, topics, users, and related credentials.
+- Redis runs in a high-availability mode through the selected operator or chart.
+- Rook-Ceph provides persistent volumes and object storage.
 
-## 5. Continuous Integration service
+## 5. Service continuous integration
 
-Setiap service memiliki dua workflow utama.
+Each service has two primary workflows.
 
 ### Pull request
 
 ```mermaid
-flowchart LR
-  PR["Pull request"] --> LINT["Lint + format"]
-  LINT --> UNIT["Unit test"]
-  UNIT --> INT["Integration test"]
-  INT --> BUILD["Build image tanpa publish"]
-  BUILD --> SCAN["Dependency + image scan"]
-  SCAN --> GATE["Required status checks"]
+graph LR
+  n1["Pull request"] --> n2["Lint and format check"]
+  n2 --> n3["Unit tests"]
+  n3 --> n4["Integration tests"]
+  n4 --> n5["Build image without publishing"]
+  n5 --> n6["Dependency and image scan"]
+  n6 --> n7["Required status checks"]
 ```
 
-Pull request source code adalah control gate manusia. Pull request tidak mem-push image release dan tidak melakukan deployment.
+The source code pull request is the human control gate. It does not publish a release image or deploy anything.
 
-### Merge ke main
+### Merge into main
 
 ```mermaid
-flowchart LR
-  MERGE["Merge main"] --> TEST["Test ulang"]
-  TEST --> BUILD["Build image sekali"]
-  BUILD --> SBOM["Generate SBOM"]
-  SBOM --> SCAN["Scan final image"]
-  SCAN --> SIGN["Sign artifact"]
-  SIGN --> PUSH["Push GHCR"]
-  PUSH --> DIGEST["Ambil image digest"]
-  DIGEST --> DEPLOY["Trigger deployment workflow"]
+graph LR
+  n1["Merge into main"] --> n2["Run tests again"]
+  n2 --> n3["Build image once"]
+  n3 --> n4["Generate SBOM"]
+  n4 --> n5["Scan final image"]
+  n5 --> n6["Sign artifact"]
+  n6 --> n7["Push to GHCR"]
+  n7 --> n8["Resolve image digest"]
+  n8 --> n9["Trigger deployment workflow"]
 ```
 
-Manifest selalu menggunakan digest:
+The manifest always uses a digest:
 
 ```text
 ghcr.io/rombay-tbk/rombay-core@sha256:0123456789abcdef...
 ```
 
-Tag boleh ditambahkan untuk keterbacaan, tetapi tidak menjadi identitas artifact yang dipasang ke production.
+A tag may be added for readability, but it is not the identity of the artifact deployed to production.
 
-## 6. Continuous Delivery langsung ke production
+## 6. Continuous delivery directly to production
 
-Setelah image berhasil diterbitkan, deployment workflow membuka pull request ke repo `rombay-kubernetes`.
+After the image is published, the deployment workflow opens a pull request against `rombay-kubernetes`.
 
-Contoh perubahan:
+Example change:
 
 ```diff
  image:
@@ -211,243 +211,243 @@ Contoh perubahan:
 +  digest: sha256:new
 ```
 
-Alur lengkap:
+Complete flow:
 
 ```mermaid
 sequenceDiagram
   participant CI as Service CI
   participant KR as rombay-kubernetes
   participant AR as Argo CD
-  participant K8S as Kubernetes production
+  participant K8S as Production Kubernetes
   participant OBS as Verification
 
-  CI->>CI: build, scan, push image
-  CI->>KR: PR update production digest
-  KR->>KR: render Helm + validate schema/policy
-  KR->>KR: auto-merge jika image-only dan valid
-  AR->>KR: pull desired state
-  AR->>K8S: PreSync migration Job
-  K8S-->>AR: migration success
-  AR->>K8S: rolling update
-  K8S-->>OBS: health, metrics, logs
+  CI->>CI: Build, scan, and push image
+  CI->>KR: Open PR with production digest update
+  KR->>KR: Render Helm and validate schema and policy
+  KR->>KR: Auto-merge valid image-only change
+  AR->>KR: Pull desired state
+  AR->>K8S: Run PreSync migration Job
+  K8S-->>AR: Migration succeeded
+  AR->>K8S: Perform rolling update
+  K8S-->>OBS: Report health, metrics, and logs
 ```
 
-Pull request deployment tidak menunggu reviewer manusia jika seluruh kondisi berikut terpenuhi:
+The deployment pull request does not require a human reviewer when all of these conditions are met:
 
-- hanya field image digest service yang berubah;
-- digest berasal dari GHCR organisasi `rombay-tbk`;
-- CI source commit sudah lulus dan di-merge;
-- Helm lint dan render berhasil;
-- manifest lolos schema serta policy validation;
-- tidak ada secret plaintext;
-- branch protection required checks lulus.
+- Only the service image digest field changes.
+- The digest belongs to an image in the `rombay-tbk` GHCR organization.
+- The source commit passed CI and was merged.
+- Helm lint and rendering succeed.
+- The rendered manifests pass schema and policy validation.
+- No plaintext secrets are present.
+- All branch protection checks pass.
 
-GitHub App hanya memiliki akses minimum untuk membuat branch, mengubah file production values yang diizinkan, dan membuka pull request. App tidak diberi akses administrator cluster.
+The GitHub App receives only enough access to create a branch, modify the allowed production values file, and open a pull request. It has no cluster administrator access.
 
-## 7. Perubahan yang tidak boleh auto-merge
+## 7. Changes that must not auto-merge
 
-Perubahan berikut tetap memerlukan review manusia:
+The following changes still require human review:
 
-- upgrade Kubernetes, Argo CD, operator, atau CRD;
-- perubahan PostgreSQL, Kafka, Redis, Rook-Ceph, dan storage;
-- perubahan resource request/limit besar;
-- perubahan replica, autoscaling, PDB, atau topology policy;
-- perubahan network policy, RBAC, secret management, dan admission policy;
-- perubahan database migration strategy;
-- perubahan Gateway API, TLS, DNS, dan jalur trafik production.
+- Kubernetes, Argo CD, operator, or CRD upgrades.
+- PostgreSQL, Kafka, Redis, Rook-Ceph, and storage changes.
+- Significant resource request or limit changes.
+- Replica, autoscaling, PDB, or topology policy changes.
+- Network policy, RBAC, secret management, and admission policy changes.
+- Database migration strategy changes.
+- Gateway API, TLS, DNS, and production traffic path changes.
 
-Dengan pemisahan ini, automation image release tidak dapat dipakai untuk menyisipkan perubahan platform.
+This separation prevents the image release automation from introducing unrelated platform changes.
 
-## 8. Argo CD dan Helm
+## 8. Argo CD and Helm
 
-Argo CD menjadi satu-satunya komponen yang menerapkan desired state ke cluster. Argo CD `Application` menunjuk ke:
+Argo CD is the only component that applies the desired state to the cluster. Its `Application` points to:
 
-- chart service;
-- production values;
-- branch `main` repo `rombay-kubernetes`;
-- cluster dan namespace production;
-- automated sync dan self-heal policy.
+- The service chart.
+- The production values file.
+- The `main` branch of `rombay-kubernetes`.
+- The production cluster and namespace.
+- Automated sync and self-heal policies.
 
 ```text
 charts/rombay-core/
         +
 environments/production/core-values.yaml
         ↓
-Argo CD render dengan Helm
+Argo CD renders with Helm
         ↓
 Deployment + Service + HPA + PDB + NetworkPolicy
 ```
 
-Pipeline tidak menjalankan `kubectl apply` atau `helm upgrade` ke production. Credential cluster hanya dimiliki komponen delivery di dalam cluster dan operator yang berwenang.
+The pipeline does not run `kubectl apply` or `helm upgrade` against production. Cluster credentials remain with in-cluster delivery components and authorized operators.
 
-`prune` harus diaktifkan secara hati-hati. Penghapusan namespace, persistent volume, database, Kafka, Redis, dan storage tidak boleh terjadi hanya karena auto-merge image release.
+Enable `prune` carefully. An image-only auto-merge must never delete a namespace, persistent volume, database, Kafka cluster, Redis cluster, or storage resource.
 
-## 9. Migrasi database
+## 9. Database migrations
 
-Core dan Ledger menjalankan migrasi melalui Argo CD `PreSync` Job:
-
-```text
-desired image digest berubah
-    ↓
-jalankan migration Job
-    ↓
-migration berhasil?
-    ├── tidak → sync gagal dan rollout berhenti
-    └── ya → rolling update Deployment
-```
-
-Ketentuan migrasi:
-
-- Migration Job memakai digest image yang sama dengan aplikasi.
-- Runtime database user tidak memiliki hak DDL.
-- Migrasi harus backward-compatible dengan pod versi sebelumnya.
-- Kegagalan migrasi menghentikan rollout.
-- Rollback aplikasi tidak dianggap sebagai rollback database.
-- Perubahan destruktif menggunakan pola expand-and-contract dalam release terpisah.
-
-## 10. Strategi rollout
-
-Baseline menggunakan Kubernetes `RollingUpdate`:
-
-- Gateway dan Core memiliki minimal dua replica jika kapasitas memungkinkan.
-- `maxUnavailable: 0` dipakai jika cluster memiliki ruang untuk pod tambahan saat rollout.
-- Readiness probe mencegah pod menerima trafik sebelum siap.
-- Startup probe memberi waktu startup untuk service yang lambat.
-- Liveness probe hanya mendeteksi proses yang benar-benar macet.
-- Pod replica disebarkan ke VM berbeda.
-- `PodDisruptionBudget` menjaga replica tersedia saat node drain terencana.
-
-Canary deployment dan rollback otomatis dengan Argo Rollouts dapat ditambahkan setelah metrics dan threshold production sudah stabil. Baseline awal tidak menganggap canary sebagai syarat deployment.
-
-## 11. Verifikasi deployment
-
-Release dianggap berhasil hanya jika:
-
-- Argo CD menunjukkan `Synced` dan `Healthy`;
-- migration Job selesai jika terdapat migrasi;
-- Deployment mencapai jumlah replica tersedia yang diinginkan;
-- readiness probe seluruh pod lulus;
-- smoke test endpoint production lulus;
-- Kafka consumer lag tidak tumbuh abnormal;
-- error rate, latency, outbox backlog, dan webhook retry berada dalam batas;
-- node, storage, PostgreSQL, Kafka, dan Redis tetap sehat.
-
-Status `Synced` saja tidak cukup karena manifest dapat sesuai Git ketika aplikasi masih belum sehat.
-
-## 12. Kegagalan dan rollback
-
-Jika migration Job atau readiness gagal, Argo CD menandai aplikasi `Degraded` dan rollout tidak dianggap selesai. Alert harus dikirim ke operator.
-
-Rollback baseline dilakukan dengan Git revert:
+Core and Ledger run migrations through an Argo CD `PreSync` Job:
 
 ```text
-deployment bermasalah
+desired image digest changes
     ↓
-revert commit digest di rombay-kubernetes
+run migration Job
     ↓
-merge emergency change
-    ↓
-Argo CD menyinkronkan digest sebelumnya
-    ↓
-verifikasi health dan metrics
+did migration succeed?
+    ├── no  → sync fails and rollout stops
+    └── yes → start rolling update
 ```
 
-Jangan menjalankan `helm rollback` manual untuk resource yang dikelola Argo CD karena hasilnya berbeda dari desired state Git dan dapat dikembalikan oleh self-heal.
+Migration requirements:
 
-Automatic rollback baru diaktifkan setelah sinyal kesehatan dapat dipercaya. Rollback yang salah berdasarkan alert yang noisy dapat memperpanjang insiden.
+- The migration Job uses the same image digest as the application.
+- The runtime database user has no DDL privileges.
+- Migrations remain backward-compatible with the previous Pods.
+- A failed migration stops the rollout.
+- An application rollback is not treated as a database rollback.
+- Destructive changes use an expand-and-contract pattern across separate releases.
 
-## 13. Pipeline platform
+## 10. Rollout strategy
 
-Komponen platform tidak mengikuti auto-merge image aplikasi. Versi operator dan chart platform diperbarui melalui pull request dengan review manusia.
+The baseline uses Kubernetes `RollingUpdate`:
 
-Urutan bootstrap:
+- Gateway and Core have at least two replicas when capacity allows.
+- Use `maxUnavailable: 0` when the cluster has room for an additional Pod during rollout.
+- Readiness probes prevent Pods from receiving traffic before they are ready.
+- Startup probes allow slower services enough startup time.
+- Liveness probes only detect genuinely stuck processes.
+- Pod replicas are spread across different VMs.
+- A `PodDisruptionBudget` preserves availability during planned node drains.
+
+Canary deployment and automatic rollback with Argo Rollouts can be added after production metrics and thresholds are stable. Canary is not a baseline release requirement.
+
+## 11. Deployment verification
+
+A release is successful only when:
+
+- Argo CD reports `Synced` and `Healthy`.
+- The migration Job has completed when the release contains a migration.
+- The Deployment reaches its desired number of available replicas.
+- All readiness probes pass.
+- The production endpoint smoke test passes.
+- Kafka consumer lag does not grow abnormally.
+- Error rate, latency, outbox backlog, and webhook retries remain within limits.
+- Nodes, storage, PostgreSQL, Kafka, and Redis remain healthy.
+
+`Synced` alone is insufficient because manifests can match Git while the application is unhealthy.
+
+## 12. Failure and rollback
+
+If a migration Job or readiness check fails, Argo CD marks the application as `Degraded`, and the rollout is not considered complete. An alert must notify an operator.
+
+The baseline rollback uses Git revert:
 
 ```text
-1. kubeadm pada tiga VM
-2. control-plane endpoint dan CNI
-3. Rook-Ceph serta storage dasar
-4. install Argo CD satu kali
-5. apply root Application
-6. Argo CD mengelola platform dan aplikasi
+deployment is unhealthy
+    ↓
+revert the digest commit in rombay-kubernetes
+    ↓
+merge the emergency change
+    ↓
+Argo CD reconciles the previous digest
+    ↓
+verify health and metrics
 ```
 
-Urutan rekonsiliasi platform:
+Do not run `helm rollback` manually for resources managed by Argo CD. That would diverge from Git and could be overwritten by self-healing.
+
+Enable automatic rollback only after health signals are trustworthy. A false rollback triggered by noisy alerts can extend an incident.
+
+## 13. Platform pipeline
+
+Platform components do not use the application image auto-merge path. Operator and platform chart versions are updated through human-reviewed pull requests.
+
+Bootstrap order:
 
 ```text
-1. CRD dan operator
-2. networking, certificate, dan storage
-3. PostgreSQL, Kafka, dan Redis custom resources
-4. observability dan backup
-5. Gateway, Core, dan Ledger
+1. Run kubeadm on the three VMs
+2. Configure the control-plane endpoint and CNI
+3. Install Rook-Ceph and base storage
+4. Install Argo CD once
+5. Apply the root Application
+6. Let Argo CD manage the platform and applications
 ```
 
-Karena tidak ada staging, upgrade platform wajib memiliki backup tervalidasi, compatibility check, maintenance window, serta rencana rollback sebelum merge.
+Platform reconciliation order:
 
-## 14. Keamanan supply chain
+```text
+1. CRDs and operators
+2. Networking, certificates, and storage
+3. PostgreSQL, Kafka, and Redis custom resources
+4. Observability and backup
+5. Gateway, Core, and Ledger
+```
 
-- Workflow menggunakan permission GitHub minimum dan eksplisit.
-- GitHub App digunakan untuk akses lintas repository; hindari personal access token jangka panjang.
-- Token GitHub App dibatasi ke repo `rombay-kubernetes` dan berumur pendek.
-- Image menghasilkan SBOM, dipindai, dan ditandatangani sebelum deployment.
-- Admission policy dapat menolak image yang tidak berasal dari registry atau signer yang diizinkan.
-- Secret tidak disimpan di Helm values atau Git plaintext.
-- Argo CD memakai credential read-only ke Git jika tidak memerlukan write access.
-- Hak sync manual, override, dan akses production dibatasi melalui RBAC dan diaudit.
-- Bot image update tidak boleh mengubah chart, platform, policy, atau secret reference.
+Because there is no staging environment, every platform upgrade requires a validated backup, compatibility checks, a maintenance window, and a rollback plan before merge.
 
-## 15. Branch dan review policy
+## 14. Software supply chain security
 
-Branch `main` menjadi desired state yang dibaca Argo CD.
+- Workflows use explicit, minimum GitHub permissions.
+- A GitHub App provides cross-repository access; avoid long-lived personal access tokens.
+- The GitHub App token is short-lived and scoped to `rombay-kubernetes`.
+- Images produce an SBOM, are scanned, and are signed before deployment.
+- Admission policy can reject images from unapproved registries or signers.
+- Secrets are never stored in plaintext Helm values or Git files.
+- Argo CD uses read-only Git credentials when write access is unnecessary.
+- Manual sync, override, and production access are restricted through audited RBAC.
+- The image update bot cannot modify charts, platform configuration, policies, or secret references.
 
-Policy untuk update image otomatis:
+## 15. Branch and review policy
 
-- pull request wajib dibuat oleh GitHub App yang diizinkan;
-- hanya file digest service terkait yang boleh berubah;
-- seluruh required checks wajib lulus;
-- auto-merge diizinkan tanpa reviewer manusia;
-- force push dan branch deletion dinonaktifkan.
+The `main` branch is the desired state consumed by Argo CD.
 
-Policy untuk platform dan konfigurasi manual:
+Policy for automatic image updates:
 
-- pull request wajib;
-- CODEOWNERS review wajib;
-- perubahan database, Kafka, storage, RBAC, network, dan production policy memerlukan approval manusia;
-- force push dan bypass oleh user biasa dinonaktifkan.
+- The pull request must be created by the approved GitHub App.
+- Only the related service digest file may change.
+- All required checks must pass.
+- Auto-merge is allowed without a human reviewer.
+- Force push and branch deletion are disabled.
 
-## 16. Workflow yang dibutuhkan
+Policy for platform and manual configuration changes:
+
+- A pull request is required.
+- CODEOWNERS review is required.
+- Database, Kafka, storage, RBAC, network, and production policy changes require human approval.
+- Force push and ordinary user bypass are disabled.
+
+## 16. Required workflows
 
 | Repository | Workflow | Trigger | Output |
 |---|---|---|---|
-| Service | `ci.yml` | Pull request | Lint, test, scan, dan required checks |
-| Service | `release-image.yml` | Merge ke `main` | Image digest, SBOM, dan signature |
-| Service | `deploy-production.yml` | Image release sukses | PR image-only ke `rombay-kubernetes` |
-| Kubernetes | `validate.yml` | Pull request | Helm render, schema, policy, dan change-scope check |
-| Kubernetes | `auto-merge-image.yml` | Checks image-only lulus | Merge desired digest production |
+| Service | `ci.yml` | Pull request | Lint, test, scan, and required checks |
+| Service | `release-image.yml` | Merge into `main` | Image digest, SBOM, and signature |
+| Service | `deploy-production.yml` | Successful image release | Image-only PR against `rombay-kubernetes` |
+| Kubernetes | `validate.yml` | Pull request | Helm render, schema, policy, and change-scope checks |
+| Kubernetes | `auto-merge-image.yml` | Successful image-only checks | Merge the desired production digest |
 
-Argo CD menangani deployment setelah merge, sehingga workflow GitHub tidak membutuhkan kubeconfig production.
+Argo CD handles deployment after merge, so GitHub workflows do not need a production kubeconfig.
 
-## 17. Risiko yang diterima
+## 17. Accepted risks
 
-Desain satu cluster dan satu environment menyederhanakan biaya serta pipeline, tetapi menerima risiko berikut:
+A single cluster and environment reduce cost and pipeline complexity, but accept these risks:
 
-- tidak ada validasi pada environment yang menyerupai production sebelum deployment;
-- bug yang lolos CI langsung mencapai production;
-- upgrade platform pertama kali diuji pada cluster production;
-- seluruh aplikasi dan data berbagi failure domain tiga VM;
-- kehilangan cluster atau storage domain dapat menghentikan seluruh Rombay;
-- backup di cluster yang sama bukan perlindungan terhadap kehilangan seluruh cluster.
+- There is no production-like environment for pre-deployment validation.
+- A defect that passes CI reaches production directly.
+- Platform upgrades are first exercised on the production cluster.
+- Applications and data share the same three-VM failure domain.
+- Loss of the cluster or storage domain can stop the entire Rombay system.
+- A backup stored in the same cluster does not protect against total cluster loss.
 
-Risiko dikurangi melalui integration test dengan dependency sementara di CI, manifest validation, immutable image, rolling update, readiness probe, observability, backup, dan Git-based rollback. Backup yang mampu menghadapi kehilangan seluruh cluster tetap membutuhkan salinan pada failure domain lain.
+Mitigations include integration tests with temporary CI dependencies, manifest validation, immutable images, rolling updates, readiness probes, observability, backups, and Git-based rollback. Protection against total cluster loss still requires a backup copy in another failure domain.
 
-## 18. Keputusan lanjutan
+## 18. Open decisions
 
-Hal berikut perlu difinalkan sebelum pipeline diimplementasikan:
+The following decisions must be finalized before implementing the pipeline:
 
-- GitHub-hosted runner atau Actions Runner Controller di cluster.
-- GitHub App serta aturan path yang diizinkan untuk update digest.
-- Scanner, signer, SBOM format, dan admission policy.
-- Implementasi Gateway API, CNI, MetalLB, dan certificate management.
-- Kapasitas CPU, memori, dan disk masing-masing VM.
-- Target replica serta resource request/limit tiap komponen.
-- Health threshold, alert routing, dan smoke test production.
-- Lokasi backup di luar failure domain cluster production.
+- GitHub-hosted runners or Actions Runner Controller in the cluster.
+- GitHub App permissions and allowed paths for digest updates.
+- Scanner, signer, SBOM format, and admission policy.
+- Gateway API, CNI, MetalLB, and certificate management implementations.
+- CPU, memory, and disk capacity for each VM.
+- Replica targets and resource requests and limits for every component.
+- Health thresholds, alert routing, and production smoke tests.
+- Backup storage outside the production cluster failure domain.
